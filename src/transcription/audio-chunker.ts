@@ -30,7 +30,17 @@ function run(cmd: string, args: string[]): Promise<{ code: number; stdout: strin
 
 export async function chunkAudioIfNeeded(inputPath: string, maxBytes = 25 * 1024 * 1024): Promise<ChunkResult | null> {
   const stat = await fs.stat(inputPath);
-  if (stat.size <= maxBytes) return null; // no chunking needed
+  // Allow override via env variable (in megabytes)
+  const targetMbEnv = process.env.CHUNK_TARGET_MB ? parseFloat(process.env.CHUNK_TARGET_MB) : undefined;
+  if (targetMbEnv && isFinite(targetMbEnv) && targetMbEnv > 0) {
+    maxBytes = targetMbEnv * 1024 * 1024;
+  }
+  const maxChunkSecondsEnv = process.env.MAX_CHUNK_SECONDS ? parseInt(process.env.MAX_CHUNK_SECONDS, 10) : undefined; // hard ceiling (e.g. 1400)
+  const hardMaxSeconds = (isFinite(maxChunkSecondsEnv as number) && (maxChunkSecondsEnv as number) > 0) ? (maxChunkSecondsEnv as number) : 1400;
+  if (stat.size <= maxBytes) {
+    // Even if size small, still ensure duration under hard limit; if too long, we must segment by time only.
+    // We'll only segment if duration > hardMaxSeconds.
+  }
   try {
     // Use ffprobe to get duration
   const probeCmd = ffprobeBin || 'ffprobe';
@@ -49,9 +59,24 @@ export async function chunkAudioIfNeeded(inputPath: string, maxBytes = 25 * 1024
       throw new Error('Could not determine audio duration for chunking');
     }
 
-    const bytesPerSecond = stat.size / durationSeconds;
-    const targetSecondsRaw = Math.floor(maxBytes / bytesPerSecond);
-    const segmentSeconds = Math.max(60, targetSecondsRaw); // at least 60s
+    const needsSizeChunking = stat.size > maxBytes;
+    const needsTimeChunking = durationSeconds > hardMaxSeconds;
+    if (!needsSizeChunking && !needsTimeChunking) {
+      return null; // no chunking necessary
+    }
+
+    const bytesPerSecond = stat.size / Math.max(durationSeconds, 1);
+    let targetSecondsRaw = Math.floor(maxBytes / bytesPerSecond);
+    if (!isFinite(targetSecondsRaw) || targetSecondsRaw <= 0) targetSecondsRaw = 300; // fallback ~5 min
+
+    // Choose smallest between targetSecondsRaw and hardMaxSeconds to satisfy both constraints
+    let segmentSeconds = Math.min(targetSecondsRaw, hardMaxSeconds);
+    // Avoid generating huge segments inadvertently
+    segmentSeconds = Math.max(60, Math.min(segmentSeconds, hardMaxSeconds));
+    // If durationSeconds still less than segmentSeconds (e.g., only time chunking), clamp
+    if (durationSeconds < segmentSeconds) segmentSeconds = Math.floor(durationSeconds);
+    // Guarantee segmentSeconds < hardMaxSeconds to avoid boundary equal exceeding due to rounding by ffmpeg
+    if (segmentSeconds >= hardMaxSeconds) segmentSeconds = hardMaxSeconds - 1;
 
     const dir = path.dirname(inputPath);
     const base = path.basename(inputPath, path.extname(inputPath));

@@ -17,7 +17,7 @@ export class AIService {
         this.logger.log('Generating meeting notes from transcript:', transcript);
         const response = await this.openai.responses.create({
             model: 'gpt-5-nano',
-            instructions: 'Genera anotaciones en formato markdown que resuman la transcripción de una clase universitaria que recibirás de manera completa. Si crees necesario añade información que complemente las anotaciones, pero especifica cuando una información no está en la transcripción original sino que la añades tú para complementar las anotaciones. Algo importante es que las anotaciones deben estar bien organizadas, con títulos y subtítulos claros, y que sean fáciles de leer y entender. Por ejemplo, puedes usar listas de bullet, listas enumeradas, negritas, cursivas, headings, etc.; al igual que el espaciado entre párrafos.',
+            instructions: 'Genera anotaciones en formato markdown que resuman la transcripción de una clase universitaria que recibirás de manera completa. Si crees necesario añade información que complemente las anotaciones, pero especifica cuando una información no está en la transcripción original sino que la añades tú para complementar las anotaciones. Algo importante es que las anotaciones deben estar bien organizadas, con títulos y subtítulos claros, y que sean fáciles de leer y entender. Por ejemplo, puedes usar listas de bullet, listas enumeradas, negritas, cursivas, headings, etc.; al igual que el espaciado entre párrafos. Si el contexto lo requiere, puedes hacer referencia a conceptos o temas relevantes que no estén explícitamente mencionados en la transcripción. Asimismo, si el tema lo requiere, puedes incluir fórmulas de cualquier tipo, por ejemplo, matemáticas o simplemente ilustrativas. Si detectas que la transcripción tiene errores comparado a tu conocimiento, o si se contradicen partes de la transcripción, intenta corregir esos errores o contradicciones en las anotaciones, pero especifica cuando haces una corrección con una nota aclaratoria. Finalmente, no ofrezcas al usuario la posibilidad de solicitar más información o ayuda, simplemente entrega las anotaciones.',
             input: `Transcripción: ${transcript}`,
         });
 
@@ -60,14 +60,29 @@ export class AIService {
                 return (response as any).text || (response as any).output_text || '';
             }
             const combined: string[] = [];
-            for (const chunk of chunkInfo.chunkPaths) {
-                this.logger.log(`Transcribing chunk: ${path.basename(chunk)}`);
-                const response = await this.openai.audio.transcriptions.create({
-                    file: fs.createReadStream(chunk),
-                    model: 'gpt-4o-mini-transcribe',
-                });
-                combined.push((response as any).text || (response as any).output_text || '');
+            const chunkPaths: string[] = chunkInfo.chunkPaths;
+            this.logger.log(`Transcribing ${chunkPaths.length} chunks in parallel`);
+
+            const transcriptionPromises = chunkPaths.map((chunkPath) => {
+                const base = path.basename(chunkPath);
+                this.logger.log(`Starting transcription for chunk: ${base}`);
+                return this.openai.audio.transcriptions
+                    .create({
+                        file: fs.createReadStream(chunkPath),
+                        model: 'gpt-4o-mini-transcribe',
+                    })
+                    .then((response) => (response as any).text || (response as any).output_text || '')
+                    .catch((err) => {
+                        this.logger.error(`Failed transcribing chunk ${base}: ${err.message}`);
+                        return '';
+                    });
+            });
+
+            const results = await Promise.all(transcriptionPromises);
+            for (const r of results) {
+                combined.push(r);
             }
+
             this.logger.log('All chunks transcribed');
             return combined.join('\n');
         } finally {
